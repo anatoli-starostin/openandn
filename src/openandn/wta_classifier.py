@@ -22,13 +22,13 @@ class WTAClassifierConfiguration:
         assert 0.0 <= self.initial_bias
         assert 0.0 >= self.constant_feedback
         assert 0.0 <= self.temperature <= 1.0
-        assert 0.0 <= self.temperature <= 1.0
+        assert 0.0 <= self.temperature_decay <= 1.0
 
 
 class WTAClassifier(object):
     def __init__(
-        self, n_inputs, n_clusters, n_classes,
-        configuration: WTAClassifierConfiguration
+            self, n_inputs, n_clusters, n_classes,
+            configuration: WTAClassifierConfiguration
     ):
         self._n_inputs = n_inputs
         self._n_clusters = n_clusters
@@ -37,9 +37,9 @@ class WTAClassifier(object):
         self._temperature = self._configuration.temperature
 
         self._clustering_weights = torch.ones([n_clusters, n_inputs], dtype=torch.float32)
-        self._clustering_weights[:, :] -= 2 * torch.rand(
+        self._clustering_weights[:, :] -= torch.rand(
             [n_clusters, n_inputs], dtype=torch.float32
-        ) * self._configuration.noise_level
+        ) * (2 * self._configuration.noise_level)
         if self._configuration.do_weights_normalization:
             self._clustering_weights /= self._clustering_weights.norm(dim=-1, keepdim=True)
         self._classifier_weights = torch.ones([n_classes, n_clusters], dtype=torch.float32)
@@ -47,12 +47,15 @@ class WTAClassifier(object):
             [n_classes, n_clusters], dtype=torch.float32
         )
         if self._configuration.constant_feedback < 0.0:
-            self._inverse_classifier_weights = torch.full([n_clusters, n_classes], self._configuration.constant_feedback)
-            clusters_per_class = n_clusters // n_classes
+            self._inverse_classifier_weights = torch.full([n_clusters, n_classes],
+                                                          self._configuration.constant_feedback)
+            clusters_per_class = (n_clusters + (n_classes - 1)) // n_classes
             cluster_idx = 0
             for c in range(n_classes):
                 for _ in range(clusters_per_class):
-                    mapping[cluster_idx, c] = 0.0
+                    if cluster_idx == n_clusters:
+                        break
+                    self._inverse_classifier_weights[cluster_idx, c] = 0.0
                     cluster_idx += 1
         else:
             self._inverse_classifier_weights = torch.ones([n_clusters, n_classes], dtype=torch.float32)
@@ -91,14 +94,15 @@ class WTAClassifier(object):
 
             if self._configuration.feedback_cf > 0.0:
                 inverse_prediction = gtb @ self._inverse_classifier_weights.T
-                winners = torch.argmax(biased_u + self._configuration.feedback_cf * inverse_prediction, dim=-1, keepdim=True)
+                winners = torch.argmax(biased_u + self._configuration.feedback_cf * inverse_prediction, dim=-1,
+                                       keepdim=True)
             else:
                 winners = torch.argmax(biased_u, dim=-1, keepdim=True)
 
             y_k = torch.zeros([data.shape[0], self._n_clusters], device=xb.device)
             y_k.scatter_(1, winners, 1.0)
 
-            if self._configuration.constant_feedback == 0.0:
+            if self._configuration.feedback_cf > 0.0 and self._configuration.constant_feedback == 0.0:
                 inverse_d = gtb.unsqueeze(1) - self._inverse_classifier_weights
                 inverse_delta_w = (inverse_d * y_k.unsqueeze(2)).sum(dim=0)
                 self._inverse_classifier_weights += inverse_delta_w * self._configuration.lr
@@ -109,16 +113,22 @@ class WTAClassifier(object):
             self._classifier_weights += classifier_delta_w * self._configuration.classifier_lr
 
             self._winners_stats += y_k.sum(dim=0).to(dtype=torch.int32)
-            if self._temperature > 0.0:
-                quasi_grad = -torch.softmax(biased_u / self._anti_hebb_coeff, dim=-1)
+            if self._temperature > 1e-08:
+                quasi_grad = -torch.softmax(u / self._temperature, dim=-1)
                 quasi_grad.scatter_(1, winners, 1.0)
                 self._temperature *= self._configuration.temperature_decay
             else:
                 quasi_grad = y_k
 
-            d = xb.unsqueeze(1) - self._clustering_weights
-            clustering_delta_w = (d * quasi_grad.unsqueeze(2)).sum(dim=0)
-            delta_b = (quasi_grad * (0.0 - self._clustering_bias)).sum(dim=0)
+            clustering_delta_w = (
+                    (quasi_grad * y_k).unsqueeze(2) * (xb.unsqueeze(1) - self._clustering_weights) +
+                    (quasi_grad * (1 - y_k)).unsqueeze(2) * (0.0 - self._clustering_weights)
+            ).sum(dim=0)
+
+            delta_b = (
+                    quasi_grad * (y_k * (0.0 - self._clustering_bias) + (1 - y_k) * (
+                        self._clustering_bias - self._configuration.initial_bias))
+            ).sum(dim=0)
 
             self._clustering_weights += self._configuration.lr * clustering_delta_w
             if self._configuration.do_weights_normalization:
@@ -143,9 +153,6 @@ class WTAClassifier(object):
             y_k.scatter_(1, winners, 1.0)
             prediction = y_k @ self._classifier_weights.T
             return y_k, prediction
-
-    def get_last_mean_delta_w(self):
-        return self._last_mean_delta_w
 
     def get_winners_stats(self):
         return self._winners_stats
