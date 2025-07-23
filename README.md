@@ -1,5 +1,5 @@
 # openandn
-The open part of the ANDN (artificial neuron detector networks) framework
+The open part of the ANDN (artificial neural detector networks) framework
 
 # CUDA implementation of Artificial Neural Detector Networks will be here soon
 
