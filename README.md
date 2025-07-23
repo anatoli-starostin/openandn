@@ -1,6 +1,9 @@
 # openandn
 The open part of the ANDN (artificial neural detector networks) framework
 
+[Presentation]([myLib/README.md](https://docs.google.com/presentation/d/1ZPC8Vwr46jb1alC_egDFQHrFxn9Ux3qXVs3ogLv6nrE/edit?usp=sharing))
+ for NrmAI on July 23, 2025
+
 # CUDA implementation of Artificial Neural Detector Networks will be here soon
 
 # Installation
